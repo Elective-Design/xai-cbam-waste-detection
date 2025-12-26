@@ -2,6 +2,8 @@ import streamlit as st
 import av
 import torch
 import pandas as pd
+import glob
+import os
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 from ultralytics import YOLO
 
@@ -165,6 +167,7 @@ st.markdown("""
     video {
         border-radius: 12px !important;
         border: 2px solid #1F2933 !important;
+        width: 100% !important; 
     }
     
     /* Text */
@@ -299,13 +302,29 @@ def get_device():
 DEVICE, DEVICE_LABEL = get_device()
 
 # ====================================================================
-# MODEL LOADING
+# MODEL LOADING - DYNAMIC
 # ====================================================================
-# Using Untrained YOLOv10 (will likely download yolov10n.pt)
-MODEL_CONFIG = {
-    "YOLOv10 Nano (Untrained)": "yolov10n.pt",
-    "YOLOv8 Nano (Fallback)": "yolov8n.pt"
-}
+def get_all_models():
+    """Scan directory recursively for .pt files"""
+    # Search in current directory and subdirectories (up to depth 3)
+    models = []
+    
+    # search current dir
+    models.extend(glob.glob("*.pt"))
+    
+    # search known subdirs like YOLO_Runs
+    models.extend(glob.glob("**/*.pt", recursive=True))
+    
+    # Filter out duplicates and non-model files if needed
+    models = list(set(models))
+    
+    if not models:
+        return ["yolov10n.pt"] # Fallback
+    
+    # Sort to make 'best.pt' first if it exists (prioritize 'best.pt' in filename)
+    models.sort(key=lambda x: (not "best.pt" in x, x))
+    
+    return models
 
 @st.cache_resource(show_spinner=False)
 def load_model(model_path):
@@ -328,7 +347,9 @@ class YOLOVideoProcessor(VideoProcessorBase):
     def __init__(self):
         super().__init__()
         self.model = MODEL
-        self.conf_threshold = 0.5
+        # These will be updated from main thread
+        self.conf_threshold = 0.25 
+        self.iou_threshold = 0.45
         
     def recv(self, frame):
         if self.model is None:
@@ -336,12 +357,19 @@ class YOLOVideoProcessor(VideoProcessorBase):
             
         try:
             img = frame.to_ndarray(format="bgr24")
+            
+            # 1. Update params dynamically from session state if available
+            # Note: Webrtc runs in a separate thread, so we access session state safely
+            # or rely on the values being pushed to the processor instance.
+            
             # Inference
             results = self.model(img, 
                                conf=self.conf_threshold,
+                               iou=self.iou_threshold,
                                verbose=False,
                                max_det=20, 
-                               imgsz=480)
+                               imgsz=640) # Changed to 640 to match training!
+            
             processed_img = results[0].plot()
             return av.VideoFrame.from_ndarray(processed_img, format="bgr24")
         except Exception as e:
@@ -361,6 +389,9 @@ def render_sidebar():
                 <p style='color: #9CA3AF; margin: 0.5rem 0 0 0; font-size: 0.9rem;'>
                     Waste Detection System
                 </p>
+                <span style='background:rgba(34, 197, 94, 0.1); color:#22C55E; padding:2px 8px; border-radius:12px; font-size:0.8rem; border:1px solid rgba(34, 197, 94, 0.3);'>
+                    YOLOv11 Powered
+                </span>
             </div>
         """, unsafe_allow_html=True)
         
@@ -392,17 +423,30 @@ def render_sidebar():
             </div>
         """, unsafe_allow_html=True)
 
+        available_models = get_all_models()
         selected_model_name = st.selectbox(
             "Select AI Model",
-            list(MODEL_CONFIG.keys()),
+            available_models,
             index=0,
-            label_visibility="collapsed",
-            key="model_selection"
+            key="model_selection",
+            help="Place your .pt files in the project folder to see them here."
         )
         
+        # Load Global Model
         global MODEL
-        MODEL = load_model(MODEL_CONFIG[selected_model_name])
+        MODEL = load_model(selected_model_name)
         
+        
+        # INFERENCE SETTINGS
+        with st.expander("🛠️ Inference Settings", expanded=True):
+            conf_val = st.slider("Confidence", min_value=0.0, max_value=1.0, value=0.25, step=0.05)
+            iou_val = st.slider("IoU Threshold", min_value=0.0, max_value=1.0, value=0.45, step=0.05)
+            
+            # Store interpretable values in session state for the processor to pick up (if we were passing it)
+            # Since Processor is instantiated inside render_live_detection, we will pass these values there.
+            st.session_state['conf_threshold'] = conf_val
+            st.session_state['iou_threshold'] = iou_val
+
         st.divider()
         
         # System Status
@@ -415,7 +459,7 @@ def render_sidebar():
                 </div>
                 <div style='display: flex; justify-content: space-between; margin-bottom: 0.5rem;'>
                     <span style='color: #9CA3AF; font-size: 0.9rem;'>Model</span>
-                    <span style='color: #22C55E; font-weight: 600; font-size: 0.9rem;'>{selected_model_name.split()[0]}</span>
+                    <span style='color: #22C55E; font-weight: 600; font-size: 0.9rem;'>{selected_model_name}</span>
                 </div>
                 <div style='display: flex; justify-content: space-between;'>
                     <span style='color: #9CA3AF; font-size: 0.9rem;'>Status</span>
@@ -446,7 +490,8 @@ def render_project_overview():
         <div class='dark-card'>
             <h3>🎯 Project Goal</h3>
             <p>
-                This project aims to develop a real-time waste detection system using advanced YOLOv10 architecture.
+                This project aims to develop a real-time waste detection system using advanced 
+                <span style="color:#F5C453; font-weight:bold;">YOLOv11</span> architecture.
                 The system detects various waste objects to facilitate better waste management and recycling processes.
             </p>
         </div>
@@ -455,7 +500,7 @@ def render_project_overview():
     # Stats
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric(label="Model Architecture", value="YOLOv10")
+        st.metric(label="Model Architecture", value="YOLOv11 Medium")
     with col2:
         st.metric(label="Detection Speed", value="Real-Time")
     with col3:
@@ -498,9 +543,10 @@ def render_live_detection():
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown("""
+        current_model = st.session_state.get('model_selection', 'Unknown')
+        st.markdown(f"""
             <div class='dark-card' style='margin-bottom: 1rem;'>
-                 <strong>Active Model:</strong> YOLOv10 (Untrained/Pretrained)
+                 <strong>Active Model:</strong> {current_model}
             </div>
         """, unsafe_allow_html=True)
     with col2:
@@ -511,7 +557,44 @@ def render_live_detection():
     try:
         model_key = f"yolo_detection_{st.session_state.get('model_selection', 'default')}"
         
-        webrtc_ctx = webrtc_streamer(
+        # Factory needed to pass parameters dynamically? 
+        # Streamlit Webrtc is tricky with dynamic params.
+        # We'll use a class-based approach where we update the instance.
+        
+        def video_frame_callback(frame):
+            if MODEL is None:
+                return frame
+            
+            try:
+                img = frame.to_ndarray(format="bgr24")
+                
+                # Get dynamic params from session state
+                # Note: This callback runs in a different thread!
+                # st.session_state might be thread-safe reading? 
+                # Yes, in recent Streamlit versions usually okay for reading.
+                # If not, use defaults.
+                
+                conf = 0.25
+                iou = 0.45
+                
+                # We can't easily access st.session_state here in some contexts
+                # But let's try standard way or defaults
+                
+                # Hacky fix: Since we can't reliably pass args to this callback easily 
+                # without closure or class, we use the global variable 'MODEL' 
+                # but 'conf' we have to be careful.
+                # For now let's use the ones set in global scope or defaults.
+                
+                # Actually, class based processor is better for state.
+                pass 
+                
+            except:
+                pass
+
+        # We stick to class based processor defined above
+        # But we need to inject the params.
+        
+        ctx = webrtc_streamer(
             key=model_key,
             video_processor_factory=YOLOVideoProcessor,
             media_stream_constraints={"video": True, "audio": False},
@@ -524,7 +607,13 @@ def render_live_detection():
             }
         )
         
-        if not webrtc_ctx.state.playing:
+        # DYNAMIC UPDATE OF PROCESSOR
+        if ctx.video_processor:
+             ctx.video_processor.conf_threshold = st.session_state.get('conf_threshold', 0.25)
+             ctx.video_processor.iou_threshold = st.session_state.get('iou_threshold', 0.45)
+             ctx.video_processor.model = MODEL # Ensure latest model is used
+        
+        if not ctx.state.playing:
             st.info("👆 Click **START** above to activate camera")
             
     except Exception as e:
@@ -545,11 +634,11 @@ def render_analytics_dashboard():
         </div>
     """, unsafe_allow_html=True)
     
-    # Sample Data
+    # Sample Data - UPDATED for 8 Classes
     data = pd.DataFrame({
-        'Waste Type': ['Plastic Bottle', 'Can', 'Paper', 'Glass', 'Cardboard'],
-        'Count': [45, 32, 28, 15, 20],
-        'Confidence': ['88%', '85%', '82%', '90%', '86%']
+        'Waste Type': ['Plastic', 'Paper', 'Glass', 'Metal', 'Cardboard', 'Organic', 'Bottle', 'Trash'],
+        'Count': [45, 32, 12, 15, 20, 8, 10, 5],
+        'Confidence': ['88%', '85%', '90%', '82%', '86%', '75%', '92%', '60%']
     })
     
     st.table(data)
