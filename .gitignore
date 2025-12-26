@@ -1,0 +1,19 @@
+# System files
+.DS_Store
+.idea/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Datasets (Too large for GitHub)
+merged_dataset/
+merged_dataset.zip
+Trash classification.v2i.yolov11/
+Trash-Waste Detection.v1i.yolov11/
+Trash-ZeroWaste.v8-no-augment-dropped-trash.yolov11/
+Trash.v6-online-new-old-mix.yolov11/
+trash dataset.v1i.yolov11/
+
+# Large Model runs (optional, keeping weights if small enough)
+# YOLO_Runs/
